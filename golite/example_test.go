@@ -15,7 +15,6 @@ func Example() {
 	defer db.Close()
 
 	// 2. Execute a simple SQL statement
-	// (Currently supports BEGIN, COMMIT, and basic SELECT/INSERT/CREATE stubs)
 	err = db.Exec("BEGIN; SELECT ALL; COMMIT;")
 	if err != nil {
 		fmt.Printf("Execution error: %v\n", err)
