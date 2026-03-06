@@ -1,0 +1,2 @@
+A test of gemini subagents to create a working golite port of sqlite in Go language.
+sqlite license can be found in sqlite folder along with the snapshot of the code from https://github.com/sqlite/sqlite> master
