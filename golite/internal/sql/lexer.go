@@ -123,6 +123,16 @@ func (l *Lexer) nextToken() Token {
 	switch c {
 	case ';':
 		tokType = TK_SEMI
+	case '(':
+		tokType = TK_LP
+	case ')':
+		tokType = TK_RP
+	case ',':
+		tokType = TK_COMMA
+	case '=':
+		tokType = TK_EQ
+	case '+':
+		tokType = TK_PLUS
 	}
 
 	return Token{Type: tokType, Value: val, Pos: startPos}

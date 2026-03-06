@@ -53,6 +53,7 @@ const (
 	TK_RP
 	TK_COMMA
 	TK_EQ
+	TK_PLUS
 )
 
 type Token struct {
@@ -86,6 +87,18 @@ type Expr interface {
 	Node
 	expr()
 }
+
+type LiteralExpr struct { Token Token }
+func (*LiteralExpr) node() {}
+func (*LiteralExpr) expr() {}
+
+type BinaryExpr struct {
+    Left  Expr
+    Op    Token
+    Right Expr
+}
+func (*BinaryExpr) node() {}
+func (*BinaryExpr) expr() {}
 
 type CmdList struct {
 	Statements []Stmt
@@ -285,16 +298,130 @@ func (p *Parser) parseCmd() Stmt {
 	case TK_COMMIT, TK_END:
 		return p.parseCommit()
 	case TK_CREATE:
-		return nil // Placeholder
+		return p.parseCreateTable()
 	default:
 		p.syntaxError(p.peek(), "syntax error")
 		return nil
 	}
 }
 
+func (p *Parser) parseCreateTable() *CreateTableStmt {
+	p.match(TK_CREATE)
+	stmt := &CreateTableStmt{}
+
+	if p.match(TK_TEMP) {
+		stmt.Temp = true
+	}
+
+	if !p.match(TK_TABLE) {
+		p.syntaxError(p.peek(), "expected TABLE")
+		return nil
+	}
+
+	if p.match(TK_IF) {
+		if !p.match(TK_NOT) {
+			p.syntaxError(p.peek(), "expected NOT")
+			return nil
+		}
+		if !p.match(TK_EXISTS) {
+			p.syntaxError(p.peek(), "expected EXISTS")
+			return nil
+		}
+		stmt.IfNotExists = true
+	}
+
+	if p.peek().Type != TK_ID {
+		p.syntaxError(p.peek(), "expected table name")
+		return nil
+	}
+	stmt.Name = p.peek().Value
+	p.pos++
+
+	if !p.match(TK_LP) {
+		p.syntaxError(p.peek(), "expected '('")
+		return nil
+	}
+
+	for {
+		col := p.parseColumnDef()
+		if col == nil {
+			return nil
+		}
+		stmt.Columns = append(stmt.Columns, col)
+
+		if !p.match(TK_COMMA) {
+			break
+		}
+	}
+
+	if !p.match(TK_RP) {
+		p.syntaxError(p.peek(), "expected ')'")
+		return nil
+	}
+
+	return stmt
+}
+
+func (p *Parser) parseColumnDef() *ColumnDef {
+	if p.peek().Type != TK_ID {
+		p.syntaxError(p.peek(), "expected column name")
+		return nil
+	}
+	name := p.peek().Value
+	p.pos++
+
+	col := &ColumnDef{Name: name}
+
+	if p.peek().Type == TK_ID {
+		col.Type = &ColumnType{Name: p.peek().Value}
+		p.pos++
+	}
+
+	return col
+}
+
 func (p *Parser) parseExpr() Expr {
-	// Simple expression parsing placeholder
+	return p.parseBinaryExpr(0)
+}
+
+func (p *Parser) parseBinaryExpr(minPrecedence int) Expr {
+	left := p.parsePrimaryExpr()
+	if left == nil {
+		return nil
+	}
+	for {
+		op := p.peek()
+		prec := p.getPrecedence(op.Type)
+		if prec < minPrecedence || prec == 0 {
+			break
+		}
+		p.pos++
+		right := p.parseBinaryExpr(prec + 1)
+		left = &BinaryExpr{Left: left, Op: op, Right: right}
+	}
+	return left
+}
+
+func (p *Parser) parsePrimaryExpr() Expr {
+	tok := p.peek()
+	if tok.Type == TK_ID || tok.Type == TK_STRING {
+		p.pos++
+		return &LiteralExpr{Token: tok}
+	}
+	if p.match(TK_LP) {
+		expr := p.parseExpr()
+		p.match(TK_RP)
+		return expr
+	}
 	return nil
+}
+
+func (p *Parser) getPrecedence(t TokenType) int {
+	switch t {
+	case TK_PLUS:
+		return 10
+	}
+	return 0
 }
 
 func (p *Parser) parseBegin() *BeginStmt {
@@ -317,6 +444,31 @@ func (p *Parser) parseSelect() *SelectStmt {
 	} else {
 		p.match(TK_ALL)
 	}
+
+	for {
+		if p.peek().Value == "*" {
+			stmt.Columns = append(stmt.Columns, &LiteralExpr{Token: Token{Type: TK_ID, Value: "*"}})
+			p.pos++
+		} else {
+			expr := p.parseExpr()
+			if expr == nil {
+				break
+			}
+			stmt.Columns = append(stmt.Columns, expr)
+		}
+
+		if !p.match(TK_COMMA) {
+			break
+		}
+	}
+
+	if p.match(TK_FROM) {
+		// Just consume for now: IDs, commas, and AS
+		for !p.isAtEnd() && (p.peek().Type == TK_ID || p.peek().Type == TK_COMMA || p.peek().Type == TK_AS) {
+			p.pos++
+		}
+	}
+
 	return stmt
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"golite/internal/util"
 	"golite/internal/vfs"
+	"io"
 	"sync"
 )
 
@@ -82,10 +83,17 @@ func (p *pager) Get(pgno util.Pgno) (Page, error) {
 	
 	// Read from file
 	off := int64(pgno-1) * int64(p.pageSize)
-	_, err := p.file.ReadAt(data, off)
-	if err != nil && err.Error() != "EOF" {
+	n, err := p.file.ReadAt(data, off)
+	if err != nil && err != io.EOF {
 		p.bufferPool.Put(data)
 		return nil, err
+	}
+	
+	// Zero out the rest of the buffer if we hit EOF or partial read
+	if n < len(data) {
+		for i := n; i < len(data); i++ {
+			data[i] = 0
+		}
 	}
 
 	pg := &page{

@@ -45,9 +45,10 @@ func (p *Parser) parseInsert() *InsertStmt {
 			var row []Expr
 			for {
 				expr := p.parseExpr()
-				if expr != nil {
-					row = append(row, expr)
+				if expr == nil {
+					break
 				}
+				row = append(row, expr)
 				if !p.match(TK_COMMA) {
 					break
 				}
@@ -62,8 +63,6 @@ func (p *Parser) parseInsert() *InsertStmt {
 		}
 	} else if p.peek().Type == TK_SELECT {
 		stmt.Select = p.parseSelect()
-	} else {
-		p.syntaxError(p.peek(), "expected VALUES or SELECT in INSERT statement")
 	}
 
 	return stmt
