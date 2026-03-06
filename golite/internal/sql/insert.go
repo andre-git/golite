@@ -1,5 +1,7 @@
 package sql
 
+import "fmt"
+
 func (p *Parser) parseInsert() *InsertStmt {
 	p.match(TK_INSERT)
 	p.match(TK_INTO) 
@@ -56,6 +58,12 @@ func (p *Parser) parseInsert() *InsertStmt {
 			if !p.match(TK_RP) {
 				p.syntaxError(p.peek(), "expected ')' after values")
 			}
+
+			if len(stmt.Columns) > 0 && len(row) != len(stmt.Columns) {
+				p.errors = append(p.errors, fmt.Errorf("%d columns but %d values", len(stmt.Columns), len(row)))
+				return nil
+			}
+
 			stmt.Values = append(stmt.Values, row)
 			if !p.match(TK_COMMA) {
 				break

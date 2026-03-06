@@ -108,7 +108,12 @@ func (l *Lexer) nextToken() Token {
 			}
 		}
 
-		val := l.input[startPos:l.pos]
+		val := l.input[startPos+1 : l.pos-1]
+		// Handle escaped quotes
+		if quote == '\'' {
+			val = strings.ReplaceAll(val, "''", "'")
+		}
+		
 		tokType := TK_STRING
 		if quote != '\'' {
 			tokType = TK_ID
@@ -131,8 +136,42 @@ func (l *Lexer) nextToken() Token {
 		tokType = TK_COMMA
 	case '=':
 		tokType = TK_EQ
+		if l.peek() == '=' {
+			l.advance()
+			val = "=="
+		}
 	case '+':
 		tokType = TK_PLUS
+	case '-':
+		tokType = TK_MINUS
+	case '*':
+		tokType = TK_STAR
+	case '/':
+		tokType = TK_SLASH
+	case '<':
+		tokType = TK_LT
+		if l.peek() == '=' {
+			l.advance()
+			val = "<="
+			tokType = TK_LE
+		} else if l.peek() == '>' {
+			l.advance()
+			val = "<>"
+			tokType = TK_NE
+		}
+	case '>':
+		tokType = TK_GT
+		if l.peek() == '=' {
+			l.advance()
+			val = ">="
+			tokType = TK_GE
+		}
+	case '!':
+		if l.peek() == '=' {
+			l.advance()
+			val = "!="
+			tokType = TK_NE
+		}
 	}
 
 	return Token{Type: tokType, Value: val, Pos: startPos}
@@ -238,6 +277,24 @@ func (l *Lexer) lookupKeyword(s string) TokenType {
 		return TK_ALL
 	case "AS":
 		return TK_AS
+	case "DEFAULT":
+		return TK_DEFAULT
+	case "INTEGER":
+		return TK_INTEGER
+	case "REAL":
+		return TK_REAL
+	case "TEXT":
+		return TK_TEXT
+	case "BLOB":
+		return TK_BLOB
+	case "NULL":
+		return TK_NULL
+	case "PRIMARY":
+		return TK_PRIMARY
+	case "KEY":
+		return TK_KEY
+	case "AUTOINCREMENT":
+		return TK_AUTOINCREMENT
 	default:
 		return TK_ID
 	}

@@ -25,9 +25,9 @@ func (p *Parser) parseUpdate() *UpdateStmt {
 		}
 		p.pos++
 		
-		// Assuming '=' is represented as TK_ID or similar for now
-		// In a real lexer, this would be TK_EQ
-		p.match(TK_ID) 
+		if !p.match(TK_EQ) {
+			p.syntaxError(p.peek(), "expected '='")
+		}
 
 		val := p.parseExpr()
 		sets = append(sets, UpdateSet{

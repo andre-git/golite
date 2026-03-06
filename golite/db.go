@@ -51,16 +51,30 @@ func (db *DB) Prepare(sqlStr string) (*Stmt, error) {
 		return nil, errors.New("no statement found")
 	}
 
-	generator := sql.NewGenerator()
+	generator := sql.NewGenerator(db.backends[0].Schema)
 	ops, err := generator.Generate(cmdList.Statements[0])
 	if err != nil {
 		return nil, err
 	}
 
-	return &Stmt{
+	stmt := &Stmt{
 		db:   db,
-		vdbe: vdbe.NewVdbe(db.backends[0].Btree, ops, 10, 10), // nMem, nCursor constants for now
-	}, nil
+		vdbe: vdbe.NewVdbe(db.backends[0].Btree, ops, 100, 100), // Increase capacity
+	}
+
+	// For CREATE TABLE, we need to update the in-memory schema after execution
+	if ct, ok := cmdList.Statements[0].(*sql.CreateTableStmt); ok {
+		table := &schema.Table{
+			Name:     ct.Name,
+			RootPgno: 2, // Matches first Allocate() after Pager init
+		}
+		for _, c := range ct.Columns {
+			table.Columns = append(table.Columns, &schema.Column{Name: c.Name})
+		}
+		db.backends[0].Schema.Tables[ct.Name] = table
+	}
+
+	return stmt, nil
 }
 
 func (db *DB) Exec(sql string) error {

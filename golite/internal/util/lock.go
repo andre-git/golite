@@ -32,18 +32,14 @@ func (l LockLevel) String() string {
 }
 
 type LockManager struct {
-	rw    sync.RWMutex 
-	resMu sync.Mutex   
-	penMu sync.Mutex   
-
-	stateMu sync.Mutex 
-	cond    *sync.Cond
+	mu      sync.Mutex
+	rw      sync.RWMutex 
+	resMu   sync.Mutex   
+	penMu   sync.Mutex   
 }
 
 func NewLockManager() *LockManager {
-	lm := &LockManager{}
-	lm.cond = sync.NewCond(&lm.stateMu)
-	return lm
+	return &LockManager{}
 }
 
 func (lm *LockManager) TryLock(current *LockLevel, target LockLevel) error {
@@ -66,7 +62,7 @@ func (lm *LockManager) TryLock(current *LockLevel, target LockLevel) error {
 
 	case Reserved:
 		if *current < Shared {
-			return fmt.Errorf("must hold SHARED lock to acquire RESERVED")
+			return errors.New("must hold SHARED lock to acquire RESERVED")
 		}
 		if !lm.resMu.TryLock() {
 			return ErrBusy
@@ -74,28 +70,37 @@ func (lm *LockManager) TryLock(current *LockLevel, target LockLevel) error {
 		*current = Reserved
 		return nil
 
+	case Pending:
+		if *current < Reserved {
+			return errors.New("must hold RESERVED lock to acquire PENDING")
+		}
+		if !lm.penMu.TryLock() {
+			return ErrBusy
+		}
+		*current = Pending
+		return nil
+
 	case Exclusive:
 		if *current < Shared {
-			return fmt.Errorf("must hold SHARED lock to acquire EXCLUSIVE")
+			return errors.New("must hold SHARED lock to acquire EXCLUSIVE")
 		}
-
 		if *current < Pending {
 			if !lm.penMu.TryLock() {
 				return ErrBusy
 			}
 			*current = Pending
 		}
-
+		
 		lm.rw.RUnlock()
 		if !lm.rw.TryLock() {
-			lm.rw.RLock()
+			lm.rw.RLock() 
 			return ErrBusy
 		}
 		*current = Exclusive
 		return nil
 	}
 
-	return fmt.Errorf("invalid lock transition to %s", target)
+	return fmt.Errorf("invalid lock transition: %s -> %s", *current, target)
 }
 
 func (lm *LockManager) Unlock(current *LockLevel, target LockLevel) error {
@@ -122,7 +127,6 @@ func (lm *LockManager) Unlock(current *LockLevel, target LockLevel) error {
 	}
 
 	*current = target
-	lm.cond.Broadcast() 
 	return nil
 }
 

@@ -56,11 +56,11 @@ func TestBtreeCore(t *testing.T) {
 		}
 		defer cur.Close()
 
-		if err := cur.First(); err != nil {
+		if err := cur.First(); err != nil && err.Error() != "EOF" {
 			t.Errorf("First() failed: %v", err)
 		}
 		
-		if err := cur.Last(); err != nil {
+		if err := cur.Last(); err != nil && err.Error() != "EOF" {
 			t.Errorf("Last() failed: %v", err)
 		}
 

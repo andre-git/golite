@@ -54,6 +54,32 @@ const (
 	TK_COMMA
 	TK_EQ
 	TK_PLUS
+	TK_MINUS
+	TK_STAR
+	TK_SLASH
+	TK_LT
+	TK_GT
+	TK_LE
+	TK_GE
+	TK_NE
+	TK_DEFAULT
+	TK_INTEGER
+	TK_REAL
+	TK_TEXT
+	TK_BLOB
+	TK_NULL
+	TK_PRIMARY
+	TK_KEY
+	TK_AUTOINCREMENT
+	TK_JOIN
+	TK_INNER
+	TK_LEFT
+	TK_OUTER
+	TK_CROSS
+	TK_ON
+	TK_USING
+	TK_PRAGMA
+	TK_DOT
 )
 
 type Token struct {
@@ -99,6 +125,12 @@ type BinaryExpr struct {
 }
 func (*BinaryExpr) node() {}
 func (*BinaryExpr) expr() {}
+
+type SubqueryExpr struct {
+    Select *SelectStmt
+}
+func (*SubqueryExpr) node() {}
+func (*SubqueryExpr) expr() {}
 
 type CmdList struct {
 	Statements []Stmt
@@ -212,8 +244,13 @@ type SrcList struct {
 }
 
 type SrcItem struct {
-	Name  string
-	Alias string
+	Name     string
+	DBName   string
+	Alias    string
+	Subquery *SelectStmt
+	JoinType string
+	On       Expr
+	Using    []string
 }
 
 type InsertStmt struct {
@@ -247,6 +284,14 @@ type DeleteStmt struct {
 
 func (DeleteStmt) node() {}
 func (DeleteStmt) stmt() {}
+
+type PragmaStmt struct {
+    Name  string
+    DB    string
+    Value string
+}
+func (PragmaStmt) node() {}
+func (PragmaStmt) stmt() {}
 
 type Parser struct {
 	tokens []Token
@@ -299,10 +344,27 @@ func (p *Parser) parseCmd() Stmt {
 		return p.parseCommit()
 	case TK_CREATE:
 		return p.parseCreateTable()
+	case TK_PRAGMA:
+		return p.parsePragma()
 	default:
 		p.syntaxError(p.peek(), "syntax error")
 		return nil
 	}
+}
+
+func (p *Parser) parsePragma() *PragmaStmt {
+	p.match(TK_PRAGMA)
+	stmt := &PragmaStmt{}
+	if p.peek().Type == TK_ID {
+		stmt.Name = p.peek().Value
+		p.pos++
+	}
+	if p.match(TK_EQ) || p.match(TK_LP) {
+		stmt.Value = p.peek().Value
+		p.pos++
+		p.match(TK_RP)
+	}
+	return stmt
 }
 
 func (p *Parser) parseCreateTable() *CreateTableStmt {
@@ -372,9 +434,19 @@ func (p *Parser) parseColumnDef() *ColumnDef {
 
 	col := &ColumnDef{Name: name}
 
-	if p.peek().Type == TK_ID {
-		col.Type = &ColumnType{Name: p.peek().Value}
-		p.pos++
+	if p.match(TK_INTEGER, TK_REAL, TK_TEXT, TK_BLOB, TK_ID) {
+		col.Type = &ColumnType{Name: p.tokens[p.pos-1].Value}
+	}
+
+	for {
+		if p.match(TK_DEFAULT) {
+			_ = p.parseExpr()
+		} else if p.match(TK_PRIMARY) {
+			p.match(TK_KEY)
+			p.match(TK_AUTOINCREMENT)
+		} else {
+			break
+		}
 	}
 
 	return col
@@ -404,11 +476,21 @@ func (p *Parser) parseBinaryExpr(minPrecedence int) Expr {
 
 func (p *Parser) parsePrimaryExpr() Expr {
 	tok := p.peek()
+	if tok.Type == TK_MINUS || tok.Type == TK_PLUS {
+		p.pos++
+		right := p.parsePrimaryExpr()
+		return &BinaryExpr{Left: &LiteralExpr{Token: Token{Type: TK_ID, Value: "0"}}, Op: tok, Right: right}
+	}
 	if tok.Type == TK_ID || tok.Type == TK_STRING {
 		p.pos++
 		return &LiteralExpr{Token: tok}
 	}
 	if p.match(TK_LP) {
+		if p.peek().Type == TK_SELECT {
+			sub := p.parseSelect()
+			p.match(TK_RP)
+			return &SubqueryExpr{Select: sub}
+		}
 		expr := p.parseExpr()
 		p.match(TK_RP)
 		return expr
@@ -418,8 +500,14 @@ func (p *Parser) parsePrimaryExpr() Expr {
 
 func (p *Parser) getPrecedence(t TokenType) int {
 	switch t {
-	case TK_PLUS:
+	case TK_STAR, TK_SLASH:
+		return 11
+	case TK_PLUS, TK_MINUS:
 		return 10
+	case TK_LT, TK_LE, TK_GT, TK_GE:
+		return 9
+	case TK_EQ, TK_NE:
+		return 8
 	}
 	return 0
 }
@@ -447,7 +535,7 @@ func (p *Parser) parseSelect() *SelectStmt {
 
 	for {
 		if p.peek().Value == "*" {
-			stmt.Columns = append(stmt.Columns, &LiteralExpr{Token: Token{Type: TK_ID, Value: "*"}})
+			stmt.Columns = append(stmt.Columns, &LiteralExpr{Token: p.peek()})
 			p.pos++
 		} else {
 			expr := p.parseExpr()
@@ -463,10 +551,45 @@ func (p *Parser) parseSelect() *SelectStmt {
 	}
 
 	if p.match(TK_FROM) {
-		// Just consume for now: IDs, commas, and AS
-		for !p.isAtEnd() && (p.peek().Type == TK_ID || p.peek().Type == TK_COMMA || p.peek().Type == TK_AS) {
-			p.pos++
+		stmt.From = &SrcList{}
+		for {
+			var item SrcItem
+			if p.match(TK_LP) {
+				item.Subquery = p.parseSelect()
+				p.match(TK_RP)
+			} else if p.peek().Type == TK_ID {
+				item.Name = p.peek().Value
+				p.pos++
+				if p.match(TK_DOT) {
+					item.DBName = item.Name
+					item.Name = p.peek().Value
+					p.pos++
+				}
+			}
+
+			if p.match(TK_AS) {
+				if p.peek().Type == TK_ID {
+					item.Alias = p.peek().Value
+					p.pos++
+				}
+			}
+
+			stmt.From.Items = append(stmt.From.Items, item)
+
+			// Handle Joins
+			if p.match(TK_JOIN, TK_INNER, TK_LEFT, TK_CROSS) {
+				// Very simplified join parsing
+				continue 
+			}
+
+			if !p.match(TK_COMMA) {
+				break
+			}
 		}
+	}
+
+	if p.match(TK_WHERE) {
+		stmt.Where = p.parseExpr()
 	}
 
 	return stmt

@@ -68,7 +68,10 @@ func (b *btree) Rollback() error {
 }
 
 func (b *btree) CreateTable(flags int) (util.Pgno, error) {
-	var pgno util.Pgno = 2 
+	pgno, err := b.p.Allocate()
+	if err != nil {
+		return 0, err
+	}
 	
 	pg, err := b.p.Get(pgno)
 	if err != nil {
@@ -89,10 +92,7 @@ func (b *btree) CreateTable(flags int) (util.Pgno, error) {
 		ptfFlags = PTF_ZERODATA | PTF_LEAF
 	}
 	
-	hdrOff := 0
-	if pgno == 1 {
-		hdrOff = 100
-	}
+	hdrOff := b.headerOffset(pgno)
 	for i := range data {
 		data[i] = 0
 	}
@@ -193,14 +193,12 @@ func (c *cursor) First() error {
 		if flags&PTF_LEAF != 0 {
 			if nCell == 0 {
 				frame.index = -1
-				return nil
+				return io.EOF
 			}
 			frame.index = 0
 			return nil
 		}
-		// Interior node: move to leftmost child
 		if nCell == 0 {
-			// This shouldn't happen in a valid tree, but handle it
 			return errors.New("empty interior node")
 		}
 		childPgno := binary.BigEndian.Uint32(data[getCellPtr(data, frame.pg.Pgno(), 0):])
@@ -222,7 +220,7 @@ func (c *cursor) Last() error {
 		if flags&PTF_LEAF != 0 {
 			if nCell == 0 {
 				frame.index = -1
-				return nil
+				return io.EOF
 			}
 			frame.index = int(nCell) - 1
 			return nil
@@ -249,7 +247,6 @@ func (c *cursor) Next() error {
 		if frame.index < int(nCell) {
 			return nil
 		}
-		// Leaf reached end, move up
 		for {
 			c.popPage()
 			frame = c.top()
@@ -259,17 +256,12 @@ func (c *cursor) Next() error {
 			frame.index++
 			data = frame.pg.Data()
 			_, _, nCell, _, _, _ = getPageHeader(data, frame.pg.Pgno())
-			if frame.index <= int(nCell) {
-				// index == nCell means we move to the rightChild pointer next?
-				// For now, this logic is a bit simplistic. 
-				// Just return nil to indicate we moved.
+			if frame.index < int(nCell) {
 				return nil 
 			}
 		}
 	}
-	// BUG FIX: If it's an interior node, we should probably go down.
-	// For now, just error out to avoid infinite loop in VDBE.
-	return errors.New("Next() called on interior node (not fully implemented)")
+	return errors.New("Next() on interior node not fully implemented")
 }
 
 func (c *cursor) Prev() error { return errors.New("not implemented") }
@@ -311,11 +303,16 @@ func (c *cursor) Insert(key []byte, data []byte) error {
 	_, _, nCell, cellOffset, _, _ := getPageHeader(pgData, pg.Pgno())
 	
 	cellSize := 2 + len(key) + len(data) 
-	
 	usableSpace := int(cellOffset) - (int(getCellPtr(pgData, pg.Pgno(), int(nCell))))
 	
 	if cellSize > usableSpace {
-		return c.splitPage(frame)
+		if err := c.balance(); err != nil {
+			return err
+		}
+		frame = c.top()
+		pg = frame.pg
+		pgData = pg.Data()
+		_, _, nCell, cellOffset, _, _ = getPageHeader(pgData, pg.Pgno())
 	}
 	
 	err := c.bt.p.Write(pg)
@@ -324,11 +321,57 @@ func (c *cursor) Insert(key []byte, data []byte) error {
 	}
 	
 	newCellOffset := int(cellOffset) - cellSize
-	
 	binary.BigEndian.PutUint16(pgData[c.bt.headerOffset(pg.Pgno())+3:], nCell+1)
 	binary.BigEndian.PutUint16(pgData[c.bt.headerOffset(pg.Pgno())+5:], uint16(newCellOffset))
 	
+	// Write cell pointer
+	ptrOff := int(getCellPtr(pgData, pg.Pgno(), int(nCell)))
+	binary.BigEndian.PutUint16(pgData[ptrOff:], uint16(newCellOffset))
+
+	// Write cell data: [payloadSize(varint), rowid(varint), payload]
+	// key here is the rowid already encoded as varint from VDBE
+	n := util.PutVarint(pgData[newCellOffset:], uint64(len(data)))
+	copy(pgData[newCellOffset+n:], key)
+	copy(pgData[newCellOffset+n+len(key):], data)
+	
 	pg.SetDirty()
+	return nil
+}
+
+func (c *cursor) balance() error {
+	frame := c.top()
+	if frame.pg.Pgno() == c.root {
+		return c.balanceDeeper()
+	}
+	return c.splitPage(frame)
+}
+
+func (c *cursor) balanceDeeper() error {
+	rootPg := c.top().pg
+	newPgno, err := c.bt.p.Allocate()
+	if err != nil { return err }
+	newPg, err := c.bt.p.Get(newPgno)
+	if err != nil { return err }
+	defer c.bt.p.Release(newPg)
+	
+	if err := c.bt.p.Write(newPg); err != nil { return err }
+	if err := c.bt.p.Write(rootPg); err != nil { return err }
+	
+	// Copy root content to new page
+	copy(newPg.Data(), rootPg.Data())
+	
+	// Re-init root as interior node
+	data := rootPg.Data()
+	hdrOff := c.bt.headerOffset(rootPg.Pgno())
+	for i := range data { data[i] = 0 }
+	data[hdrOff] = 0x05 // Interior Table B-Tree
+	binary.BigEndian.PutUint32(data[hdrOff+8:], uint32(newPgno))
+	
+	rootPg.SetDirty()
+	newPg.SetDirty()
+	
+	// Update stack
+	c.stack = append(c.stack, cursorFrame{pg: newPg, index: 0})
 	return nil
 }
 
@@ -345,8 +388,31 @@ type cellInfo struct {
 
 func (c *cursor) parseCell(frame *cursorFrame) *cellInfo {
 	data := frame.pg.Data()
-	_ = getCellPtr(data, frame.pg.Pgno(), frame.index)
-	return &cellInfo{}
+	ptr := getCellOffset(data, frame.pg.Pgno(), frame.index)
+	
+	payloadSize, n := util.GetVarint(data[ptr:])
+	ptr += n
+	rowid, n := util.GetVarint(data[ptr:])
+	ptr += n
+	
+	// Table B-Tree Leaf: [payloadSize, rowid, payload]
+	key := make([]byte, 8)
+	binary.BigEndian.PutUint64(key, rowid)
+	
+	return &cellInfo{
+		key:  key,
+		data: data[ptr : ptr+int(payloadSize)],
+	}
+}
+
+func getCellOffset(data []byte, pgno util.Pgno, index int) int {
+	hdrOff := 0
+	if pgno == 1 { hdrOff = 100 }
+	ptrOff := hdrOff + 8 + (index * 2)
+	if data[hdrOff] == 0x05 || data[hdrOff] == 0x02 { // Interior
+		ptrOff = hdrOff + 12 + (index * 2)
+	}
+	return int(binary.BigEndian.Uint16(data[ptrOff:]))
 }
 
 func getCellPtr(data []byte, pgno util.Pgno, index int) int {

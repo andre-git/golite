@@ -9,22 +9,24 @@ import (
 )
 
 type Pager interface {
-    Get(pgno util.Pgno) (Page, error)
-    Write(pg Page) error
-    Release(pg Page)
-    
-    Begin(writable bool, exclusive bool) error
-    Commit() error
-    Rollback() error
+	Get(pgno util.Pgno) (Page, error)
+	Write(pg Page) error
+	Release(pg Page)
 
-    SetPageSize(size uint32) error
-    PageSize() uint32
+	Begin(writable bool, exclusive bool) error
+	Commit() error
+	Rollback() error
+
+	SetPageSize(size uint32) error
+	PageSize() uint32
+	Count() (util.Pgno, error)
+	Allocate() (util.Pgno, error)
 }
 
 type Page interface {
-    Pgno() util.Pgno
-    Data() []byte
-    SetDirty()
+	Pgno() util.Pgno
+	Data() []byte
+	SetDirty()
 }
 
 type pager struct {
@@ -36,6 +38,7 @@ type pager struct {
 	bufferPool *sync.Pool
 	writable   bool
 	exclusive  bool
+	wal        *Wal
 }
 
 type page struct {
@@ -67,6 +70,9 @@ func New(file vfs.File, pageSize uint32) Pager {
 	// Determine dbSize from file size
 	fs, _ := file.FileSize()
 	p.dbSize = util.Pgno(fs / int64(pageSize))
+	if p.dbSize == 0 {
+		p.dbSize = 1
+	}
 	return p
 }
 
@@ -80,7 +86,17 @@ func (p *pager) Get(pgno util.Pgno) (Page, error) {
 	}
 
 	data := p.bufferPool.Get().([]byte)
-	
+
+	if p.wal != nil {
+		iFrame, _ := p.wal.FindFrame(pgno)
+		if iFrame > 0 {
+			err := p.wal.ReadFrame(iFrame, data)
+			if err == nil {
+				return p.cachePage(pgno, data), nil
+			}
+		}
+	}
+
 	// Read from file
 	off := int64(pgno-1) * int64(p.pageSize)
 	n, err := p.file.ReadAt(data, off)
@@ -88,7 +104,7 @@ func (p *pager) Get(pgno util.Pgno) (Page, error) {
 		p.bufferPool.Put(data)
 		return nil, err
 	}
-	
+
 	// Zero out the rest of the buffer if we hit EOF or partial read
 	if n < len(data) {
 		for i := n; i < len(data); i++ {
@@ -96,6 +112,10 @@ func (p *pager) Get(pgno util.Pgno) (Page, error) {
 		}
 	}
 
+	return p.cachePage(pgno, data), nil
+}
+
+func (p *pager) cachePage(pgno util.Pgno, data []byte) Page {
 	pg := &page{
 		pgno:  pgno,
 		data:  data,
@@ -103,7 +123,7 @@ func (p *pager) Get(pgno util.Pgno) (Page, error) {
 		refs:  1,
 	}
 	p.cache[pgno] = pg
-	return pg, nil
+	return pg
 }
 
 func (p *pager) Write(pg Page) error {
@@ -191,4 +211,22 @@ func (p *pager) SetPageSize(size uint32) error {
 
 func (p *pager) PageSize() uint32 {
 	return p.pageSize
+}
+
+func (p *pager) Count() (util.Pgno, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	fs, err := p.file.FileSize()
+	if err != nil {
+		return 0, err
+	}
+	p.dbSize = util.Pgno(fs / int64(p.pageSize))
+	return p.dbSize, nil
+}
+
+func (p *pager) Allocate() (util.Pgno, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.dbSize++
+	return p.dbSize, nil
 }
